@@ -10,7 +10,7 @@
 #include <string>
 
 // Server_v2.js protocol:
-//   request:  { "msgType": <uint32>, "data": "<full GC message hex>" }
+//   request:  { "msgType": <uint32>, "steamid": "<uint64_t with steam id>" "data": "<full GC message hex>" }
 //   response: { "msgType": <uint32 with protobuf bit>, "data": "<protobuf payload hex>" }
 // sendProto() returns only the protobuf body, so we wrap it in the GC header here.
 
