@@ -1,24 +1,7 @@
 project(csgo_gc)
 
-find_package(MbedTLS CONFIG REQUIRED)
-find_package(Protobuf CONFIG REQUIRED)
-
-# funchook and its deps get pulled in via FetchContent
-# FIXME: consider alternatives!!! funchook is no longer
-# maintained, and our hooks won't work reliably on x86_64
-# macOS when using it
-include(FetchContent)
-set(FETCHCONTENT_QUIET FALSE)
-
-option(FUNCHOOK_BUILD_SHARED "build shared library" OFF)
-option(FUNCHOOK_BUILD_TESTS "Build tests" OFF)
-option(FUNCHOOK_INSTALL "Install Funchook" OFF)
-
-FetchContent_Declare(funchook
-	GIT_REPOSITORY https://github.com/kubo/funchook
-	GIT_SHALLOW TRUE)
-
-FetchContent_MakeAvailable(funchook)
+# Поиск libcurl
+find_package(CURL REQUIRED)
 
 add_library(csgo_gc SHARED
     appid.cpp
@@ -35,7 +18,10 @@ add_library(csgo_gc SHARED
     main.cpp
     networking_client.cpp
     networking_server.cpp
-    steam_hook.cpp)
+    steam_hook.cpp
+    external_forwarder.cpp)
+
+target_include_directories(csgo_gc PRIVATE "C:/Users/qwejk/Desktop/csgo_gc-continuous/vcpkg/installed/x86-windows/include")
 
 if (CMAKE_SYSTEM_NAME STREQUAL "Windows")
     target_sources(csgo_gc PRIVATE platform_windows.cpp)
@@ -54,28 +40,18 @@ else()
     target_compile_options(csgo_gc PRIVATE -Wall -Wextra)
 endif()
 
-set(PROTO_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../protobufs)
-file(GLOB PROTOS ${PROTO_DIR}/*.proto)
-set(PROTOC_OUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated)
-
-target_include_directories(csgo_gc PRIVATE ${PROTOC_OUT_DIR})
-
-# bruhhhhhh
-file(MAKE_DIRECTORY ${PROTOC_OUT_DIR})
-
-protobuf_generate(
-    TARGET csgo_gc
-    PROTOS ${PROTOS}
-    IMPORT_DIRS ${PROTO_DIR}
-    PROTOC_OUT_DIR ${PROTOC_OUT_DIR})
-
-source_group("Protobufs" REGULAR_EXPRESSION "\\.pb\\.(cc|h)$")
+file(GLOB PROTOBUFS ../protobufs/*.cc)
+target_include_directories(csgo_gc PRIVATE ../protobufs)
+target_sources(csgo_gc PRIVATE ${PROTOBUFS})
+source_group("Protobufs" FILES ${PROTOBUFS})
 
 target_link_libraries(csgo_gc PRIVATE
-    MbedTLS::mbedcrypto
-    protobuf::libprotobuf-lite
+    cryptopp
     funchook-static
-    steam_api)
+    libprotobuf-lite
+    steam_api
+    ${CURL_LIBRARIES}  # Добавлено
+)
 
 # apple message box
 if (APPLE)
