@@ -7,18 +7,9 @@
 In Valve games, the Game Coordinator (GC) is a backend service most notably responsible for matchmaking and inventory management (like loadouts and skins). This project redirects the GC traffic to a custom, in-process implementation.
 
 ## Why would you want this?
-While it's still possible to connect CS:GO to CS2's GC by spoofing the version number, this may break in the future if Valve updates the GC protocol. This project aims to restore most GC-related functionality without relying on a centralized server.
+While it's still possible to connect CS:GO to CS2's GC by spoofing the version number, this may break in the future if Valve updates the GC protocol. This project aims to restore most GC-related functionality.
 
 ## Current features
-- Editable inventory (inventory.txt)
-- Item equipping
-- Opening cases (including sticker capsules, patch packs, graffiti boxes and music kit boxes)
-- Graffiti support
-- Weapon StatTrak support
-- Stickers and patches
-- Name tags
-- Music kits
-- In-game store
 - Works without full Steam API emulation
 - Full Windows, Linux and macOS support
 - Functional lobbies
@@ -28,10 +19,6 @@ While it's still possible to connect CS:GO to CS2's GC by spoofing the version n
 
 ## Planned features
 - Rest of the core features (trade ups, souvenirs, storage units, StatTrak swaps...)
-
-I'm still looking for the **full** CS:GO Item Schema. If you have a relatively recent copy of it and are willing to share it, let me know!
-
-## Not planned
 - Matchmaking (can't be implemented without a centralized server)
 
 ## Installation
@@ -42,12 +29,6 @@ I'm still looking for the **full** CS:GO Item Schema. If you have a relatively r
 - Extract the contents of the downloaded archive to your game directory, replace the executables when prompted
 - Launch the game. If you get the annoying VAC message box, launch the game with the -steam argument
 - macOS users: The release binaries are not notarized, so if you're using them, you'll have to deal with that somehow
-
-## Inventory editing
-For GUI inventory editors, see https://github.com/mikkokko/csgo_gc/issues/82. For manual editing, there is a guide made by someone else [here](https://gist.github.com/dricotec/1ae3deb06c42012970c00df914348e76).
-
-## Configuration
-See [csgo_gc/config.txt](examples/config.txt) for available options.
 
 ## Building
 Requirements:
