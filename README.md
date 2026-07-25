@@ -50,6 +50,9 @@ On macOS, you need to build for x86_64 instead of arm64:
 
 For Linux clients you don't have to specify any additional options.
 
+## Configuration
+if you want to set up your own GC, you can change ip address and port to yours in `csgo_gc/external_forwarder`, at `static std::string g_serverUrl = "http://your.ip.goes.here/gc";`.
+
 ## License
 This project is licensed under the 2-Clause BSD License. See [LICENSE.md](LICENSE.md) for details.
 
