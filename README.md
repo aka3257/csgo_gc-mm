@@ -23,12 +23,12 @@ While it's still possible to connect CS:GO to CS2's GC by spoofing the version n
 
 ## Installation
 - Download [CS:GO from Steam](steam://install/4465480)
-- Download the latest release for your platform from the [releases page](https://github.com/mikkokko/csgo_gc/releases/latest)
+- Download the latest release for your platform from the [releases page](https://github.com/aka3257/csgo_gc-mm/releases/tag/Release)
 - Navigate to the game's installation directory
 - Back up your existing launcher executables as they'll be overwritten (i.e. csgo.exe, srcds.exe, csgo_linux64, etc.)
+- Navigate to `/csgo/panorama/`, open terminal in that folder, and execute command `pbin.exe patch_panorama` 
 - Extract the contents of the downloaded archive to your game directory, replace the executables when prompted
 - Launch the game. If you get the annoying VAC message box, launch the game with the -steam argument
-- macOS users: The release binaries are not notarized, so if you're using them, you'll have to deal with that somehow
 
 ## Building
 Requirements:
