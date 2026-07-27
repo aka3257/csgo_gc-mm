@@ -51,13 +51,21 @@ On macOS, you need to build for x86_64 instead of arm64:
 For Linux clients you don't have to specify any additional options.
 
 ## Configuration
-if you want to set up your own GC, you can change ip address and port to yours in `csgo_gc/external_forwarder`, at `static std::string g_serverUrl = "http://your.ip.goes.here/gc";`.
+if you want to set up your own GC: 
+1. download [CSGO-GC-Replacement](https://github.com/aka3257/CSGO-GC-Replacement)
+2. run `Server_v2.js` to generate config file
+3. change ip to your internal ip in `config.json`
+4. download source code of csgo_gc-mm from Releases page
+5. navigate to `csgo_gc-continuous/csgo_gc`
+6. open `external_forwarder.cpp` and change ip to your external ip at `static std::string g_serverUrl = "http://your.ip.goes.here/gc";`
+7. build folder `csgo_gc-continuous`
 
 ## License
 This project is licensed under the 2-Clause BSD License. See [LICENSE.md](LICENSE.md) for details.
 
 ## Credits
-* **Mikko Kokko** - Author
+* **kandr** - Fork author
+* **Mikko Kokko** - Original author
 * **Theeto** - Code reused from the predecessor project, unusual loot lists
 
 ## Third party dependencies
