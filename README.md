@@ -10,16 +10,11 @@ In Valve games, the Game Coordinator (GC) is a backend service most notably resp
 While it's still possible to connect CS:GO to CS2's GC by spoofing the version number, this may break in the future if Valve updates the GC protocol. This project aims to restore most GC-related functionality.
 
 ## Current features
-- Works without full Steam API emulation
-- Full Windows, Linux and macOS support
-- Functional lobbies
-- Dedicated server support
-- Functional server browser (only shows csgo_gc servers by default)
-- Networking using Steam's P2P interface
+- nothing(i'll do more as soon as i fix forwarder)
 
 ## Planned features
 - Rest of the core features (trade ups, souvenirs, storage units, StatTrak swaps...)
-- Matchmaking (can't be implemented without a centralized server)
+- Matchmaking 
 
 ## Installation
 - Download [CS:GO from Steam](steam://install/4465480)
