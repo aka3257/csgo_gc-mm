@@ -1,4 +1,4 @@
-# csgo_gc
+# csgo_gc-mm
 
 > [!CAUTION]
 > This project is incomplete and not ready for general use.
