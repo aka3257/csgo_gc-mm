@@ -164,6 +164,14 @@ bool ForwardToExternalServer(uint32_t msgType, const void *data, uint32_t size, 
         return false;
     }
 
+    // После отправки запроса закрываем сокет для записи,
+    // чтобы сервер понял, что данных больше не будет
+#ifdef _WIN32
+    shutdown(sock, SD_SEND);
+#else
+    shutdown(sock, SHUT_WR);
+#endif
+
     // Получаем ответ от сервера (все данные)
     std::vector<uint8_t> allData;
     if (!ReceiveData(sock, allData)) {
@@ -172,76 +180,84 @@ bool ForwardToExternalServer(uint32_t msgType, const void *data, uint32_t size, 
         return false;
     }
 
-    closesocket(sock);
-
     if (allData.empty()) {
         Platform::Print("External GC response is empty\n");
         return false;
     }
 
-    // Разбираем все сообщения, идущие подряд
+    // Вспомогательная функция для чтения 4 байт little-endian
+    auto ReadUint32LE = [](const uint8_t *data, size_t size, size_t pos, uint32_t &value) -> bool {
+        if (pos + 4 > size) return false;
+        value = data[pos] | (static_cast<uint32_t>(data[pos+1]) << 8) |
+                (static_cast<uint32_t>(data[pos+2]) << 16) |
+                (static_cast<uint32_t>(data[pos+3]) << 24);
+        return true;
+    };
+
+    // Разбираем все сообщения, идущие подряд (с префиксом длины)
     std::vector<uint8_t> combinedResponse;
     size_t pos = 0;
     size_t totalSize = allData.size();
 
     while (pos < totalSize) {
-        // Ищем начало следующего сообщения
-        if (pos + 4 > totalSize) break; // недостаточно данных для msgType
-
-        size_t start = pos;
-        // Пропускаем msgType (4 байта)
+        // Читаем длину сообщения (4 байта)
+        if (pos + 4 > totalSize) break;
+        uint32_t msgLen = 0;
+        if (!ReadUint32LE(allData.data(), totalSize, pos, msgLen)) break;
         pos += 4;
 
-        // Ищем следующее сообщение, начиная с текущей позиции
-        bool foundNext = false;
-        while (pos < totalSize) {
-            if (IsMsgTypeStart(allData.data(), totalSize, pos)) {
-                foundNext = true;
-                break;
-            }
-            pos++;
+        // Проверяем, что длина не выходит за пределы буфера
+        if (pos + msgLen > totalSize) {
+            // Если данных меньше, чем указано в длине — что-то пошло не так
+            // Добавляем оставшиеся данные как есть (fallback)
+            combinedResponse.insert(combinedResponse.end(),
+                                    allData.begin() + pos,
+                                    allData.end());
+            break;
         }
 
-        if (!foundNext) {
-            // Если следующего сообщения нет, берём всё до конца
-            pos = totalSize;
-        }
-
-        // Копируем сообщение от start до pos (включая msgType)
+        // Копируем само сообщение (msgType + protobuf-данные)
         combinedResponse.insert(combinedResponse.end(),
-                                allData.begin() + start,
-                                allData.begin() + pos);
+                                allData.begin() + pos,
+                                allData.begin() + pos + msgLen);
+        pos += msgLen;
     }
 
-    // Теперь в combinedResponse лежат все сообщения, склеенные в правильном порядке
+    // Если combinedResponse пустой — fallback: отправляем всё как есть
+    if (combinedResponse.empty()) {
+        combinedResponse = std::move(allData);
+    }
+
     response.data = std::move(combinedResponse);
 
-    // Устанавливаем msgType первого сообщения (если есть)
+    // Устанавливаем msgType из первого сообщения (если есть)
     if (!response.data.empty() && response.data.size() >= 4) {
         uint32_t firstMsgType = 0;
-        for (int i = 0; i < 4; i++) {
-            firstMsgType |= (static_cast<uint32_t>(response.data[i]) << (i * 8));
+        if (ReadUint32LE(response.data.data(), response.data.size(), 0, firstMsgType)) {
+            response.msgType = firstMsgType;
+        } else {
+            response.msgType = msgType;
         }
-        response.msgType = firstMsgType;
     } else {
-        response.msgType = msgType; // fallback
+        response.msgType = msgType;
     }
 
     response.ok = true;
 
+    // Подсчёт количества сообщений (для лога)
     size_t msgCount = 0;
-    // Можно посчитать количество сообщений (опционально)
-    for (size_t i = 0; i < combinedResponse.size(); ) {
-        if (i + 4 > combinedResponse.size()) break;
-        // Проверяем, что это msgType (старший бит)
-        if (IsMsgTypeStart(combinedResponse.data(), combinedResponse.size(), i)) {
+    for (size_t i = 0; i < response.data.size(); ) {
+        if (i + 4 > response.data.size()) break;
+        uint32_t tempMsgType = 0;
+        if (!ReadUint32LE(response.data.data(), response.data.size(), i, tempMsgType)) break;
+        if ((tempMsgType & 0x80000000) != 0) {
             msgCount++;
             i += 4;
             // Пропускаем данные до следующего msgType
-            while (i < combinedResponse.size()) {
-                if (IsMsgTypeStart(combinedResponse.data(), combinedResponse.size(), i)) {
-                    break;
-                }
+            while (i < response.data.size()) {
+                uint32_t nextMsgType = 0;
+                if (!ReadUint32LE(response.data.data(), response.data.size(), i, nextMsgType)) break;
+                if ((nextMsgType & 0x80000000) != 0) break;
                 i++;
             }
         } else {
@@ -252,5 +268,11 @@ bool ForwardToExternalServer(uint32_t msgType, const void *data, uint32_t size, 
     Platform::Print("External GC response for msg %u -> %u (%zu bytes, %zu messages)\n",
         msgType, response.msgType, response.data.size(), msgCount);
 
+    return true;
+}
+
+static bool ReadUint32LE(const uint8_t *data, size_t size, size_t pos, uint32_t &value) {
+    if (pos + 4 > size) return false;
+    value = data[pos] | (data[pos+1] << 8) | (data[pos+2] << 16) | (data[pos+3] << 24);
     return true;
 }
