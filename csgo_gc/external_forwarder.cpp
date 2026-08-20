@@ -2,279 +2,277 @@
 #include "platform.h"
 #include "gc_const.h"
 
-#include <curl/curl.h>
-
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <vector>
 
-// Server_v2.js protocol:
-//   request:  { "msgType": <uint32>, "steamid": "<uint64_t with steam id>" "data": "<full GC message hex>" }
-//   response: { "msgType": <uint32 with protobuf bit>, "data": "<protobuf payload hex>" }
-// sendProto() returns only the protobuf body, so we wrap it in the GC header here.
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#pragma comment(lib, "ws2_32.lib")
+#else
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <netdb.h>
+#endif
 
-static std::string g_serverUrl = "http://176.196.110.121:3257/gc";
+static std::string g_serverHost = "176.196.110.121";
+static int g_serverPort = 3257;
 
-void SetExternalServerUrl(const std::string &url)
-{
-    g_serverUrl = url;
+void SetExternalServerUrl(const std::string &url) {
+    // Парсим URL, чтобы извлечь хост и порт
+    size_t start = url.find("://");
+    if (start == std::string::npos) return;
+    start += 3;
+
+    size_t end = url.find(':', start);
+    if (end != std::string::npos) {
+        g_serverHost = url.substr(start, end - start);
+        g_serverPort = std::stoi(url.substr(end + 1));
+    }
 }
 
-static void AppendUint32LE(std::vector<uint8_t> &buffer, uint32_t value)
-{
-    buffer.push_back(static_cast<uint8_t>(value & 0xff));
-    buffer.push_back(static_cast<uint8_t>((value >> 8) & 0xff));
-    buffer.push_back(static_cast<uint8_t>((value >> 16) & 0xff));
-    buffer.push_back(static_cast<uint8_t>((value >> 24) & 0xff));
-}
-
-static bool ReadUint32LE(const std::vector<uint8_t> &buffer, size_t offset, uint32_t &value)
-{
-    if (offset + 4 > buffer.size())
-    {
+static bool ConnectToServer(int &sock) {
+    sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) {
+        Platform::Print("Socket creation failed\n");
         return false;
     }
 
-    value = buffer[offset]
-        | (static_cast<uint32_t>(buffer[offset + 1]) << 8)
-        | (static_cast<uint32_t>(buffer[offset + 2]) << 16)
-        | (static_cast<uint32_t>(buffer[offset + 3]) << 24);
+    struct sockaddr_in serverAddr;
+    serverAddr.sin_family = AF_INET;
+    serverAddr.sin_port = htons(g_serverPort);
+
+    if (inet_pton(AF_INET, g_serverHost.c_str(), &serverAddr.sin_addr) <= 0) {
+        struct hostent *he = gethostbyname(g_serverHost.c_str());
+        if (!he) {
+            Platform::Print("Failed to resolve hostname\n");
+            closesocket(sock);
+            return false;
+        }
+        memcpy(&serverAddr.sin_addr, he->h_addr_list[0], he->h_length);
+    }
+
+    if (connect(sock, (struct sockaddr*)&serverAddr, sizeof(serverAddr)) < 0) {
+        Platform::Print("Connection to %s:%d failed\n", g_serverHost.c_str(), g_serverPort);
+        closesocket(sock);
+        return false;
+    }
+
     return true;
 }
 
-static bool LooksLikeFullGCMessage(uint32_t msgType, const std::vector<uint8_t> &data)
-{
-    if (data.size() < 8)
-    {
-        return false;
+static bool SendData(int sock, const void *data, size_t size) {
+    const uint8_t *bytes = static_cast<const uint8_t*>(data);
+    size_t totalSent = 0;
+    while (totalSent < size) {
+        int sent = send(sock, reinterpret_cast<const char*>(bytes + totalSent), size - totalSent, 0);
+        if (sent <= 0) {
+            Platform::Print("Send failed\n");
+            return false;
+        }
+        totalSent += sent;
     }
-
-    uint32_t embeddedType = 0;
-    if (!ReadUint32LE(data, 0, embeddedType))
-    {
-        return false;
-    }
-
-    const uint32_t maskedType = msgType | ProtobufMask;
-    return embeddedType == maskedType || embeddedType == msgType;
-}
-
-static bool WrapServerProtobufPayload(uint32_t msgType, std::vector<uint8_t> &payload)
-{
-    if (payload.empty())
-    {
-        return false;
-    }
-
-    if (LooksLikeFullGCMessage(msgType, payload))
-    {
-        return true;
-    }
-
-    const uint32_t maskedType = msgType | ProtobufMask;
-
-    std::vector<uint8_t> wrapped;
-    wrapped.reserve(8 + payload.size());
-    AppendUint32LE(wrapped, maskedType);
-    AppendUint32LE(wrapped, 0);
-    wrapped.insert(wrapped.end(), payload.begin(), payload.end());
-    payload = std::move(wrapped);
     return true;
 }
 
-static std::string ParseJsonString(const std::string &json, const std::string &key)
-{
-    const std::string searchKey = "\"" + key + "\"";
-    const size_t keyPos = json.find(searchKey);
-    if (keyPos == std::string::npos)
-    {
-        return {};
+static bool ReceiveData(int sock, std::vector<uint8_t> &buffer) {
+    char recvBuffer[4096];
+    int received;
+    while ((received = recv(sock, recvBuffer, sizeof(recvBuffer), 0)) > 0) {
+        buffer.insert(buffer.end(), reinterpret_cast<uint8_t*>(recvBuffer),
+                      reinterpret_cast<uint8_t*>(recvBuffer + received));
     }
-
-    size_t valueStart = json.find(':', keyPos);
-    if (valueStart == std::string::npos)
-    {
-        return {};
-    }
-    valueStart++;
-
-    while (valueStart < json.length() && (json[valueStart] == ' ' || json[valueStart] == '\t'))
-    {
-        valueStart++;
-    }
-
-    if (valueStart >= json.length() || json[valueStart] != '"')
-    {
-        return {};
-    }
-    valueStart++;
-
-    const size_t valueEnd = json.find('"', valueStart);
-    if (valueEnd == std::string::npos)
-    {
-        return {};
-    }
-
-    return json.substr(valueStart, valueEnd - valueStart);
+    return received == 0;
 }
 
-static bool ParseJsonUint32(const std::string &json, const std::string &key, uint32_t &value)
-{
-    const std::string searchKey = "\"" + key + "\"";
-    const size_t keyPos = json.find(searchKey);
-    if (keyPos == std::string::npos)
-    {
-        return false;
-    }
-
-    size_t valueStart = json.find(':', keyPos);
-    if (valueStart == std::string::npos)
-    {
-        return false;
-    }
-    valueStart++;
-
-    while (valueStart < json.length() && (json[valueStart] == ' ' || json[valueStart] == '\t'))
-    {
-        valueStart++;
-    }
-
-    const size_t valueEnd = json.find_first_of(",}", valueStart);
-    const std::string number = json.substr(valueStart, valueEnd - valueStart);
-    if (number.empty())
-    {
-        return false;
-    }
-
-    char *end = nullptr;
-    const unsigned long parsed = strtoul(number.c_str(), &end, 10);
-    if (end == number.c_str())
-    {
-        return false;
-    }
-
-    value = static_cast<uint32_t>(parsed);
-    return true;
-}
-
-static bool HexToBytes(const std::string &hexStr, std::vector<uint8_t> &bytes)
-{
-    if (hexStr.empty() || (hexStr.length() % 2) != 0)
-    {
-        return false;
-    }
+static bool HexToBytes(const std::string &hexStr, std::vector<uint8_t> &bytes) {
+    if (hexStr.empty() || (hexStr.length() % 2) != 0) return false;
 
     bytes.clear();
     bytes.reserve(hexStr.length() / 2);
 
-    for (size_t i = 0; i + 1 < hexStr.length(); i += 2)
-    {
-        const char hexByte[3] = { hexStr[i], hexStr[i + 1], 0 };
+    for (size_t i = 0; i + 1 < hexStr.length(); i += 2) {
+        char hexByte[3] = { hexStr[i], hexStr[i + 1], 0 };
         char *endptr = nullptr;
-        const unsigned long byte = strtoul(hexByte, &endptr, 16);
-        if (endptr != hexByte + 2)
-        {
-            return false;
-        }
-
+        unsigned long byte = strtoul(hexByte, &endptr, 16);
+        if (endptr != hexByte + 2) return false;
         bytes.push_back(static_cast<uint8_t>(byte));
     }
-
     return true;
+}
+
+static std::string BytesToHex(const std::vector<uint8_t> &bytes) {
+    static const char hexChars[] = "0123456789abcdef";
+    std::string hex;
+    hex.reserve(bytes.size() * 2);
+    for (uint8_t byte : bytes) {
+        hex.push_back(hexChars[(byte >> 4) & 0x0F]);
+        hex.push_back(hexChars[byte & 0x0F]);
+    }
+    return hex;
 }
 
 uint64_t g_lastSteamId = 0;
 
-bool ForwardToExternalServer(uint32_t msgType, const void *data, uint32_t size, ExternalGCResponse &response)
-{
+static bool IsMsgTypeStart(const uint8_t *data, size_t size, size_t pos) {
+    if (pos + 4 > size) return false;
+    // Проверяем, что первый байт имеет старший бит (0x80), т.е. msgType >= 0x80000000
+    // Это не 100% надёжно, но для GC-сообщений работает.
+    uint32_t val = 0;
+    for (int i = 0; i < 4; i++) {
+        val |= (static_cast<uint32_t>(data[pos + i]) << (i * 8));
+    }
+    return (val & 0x80000000) != 0;
+}
+
+bool ForwardToExternalServer(uint32_t msgType, const void *data, uint32_t size, ExternalGCResponse &response) {
     response = {};
     response.msgType = msgType;
 
-    CURL *curl = curl_easy_init();
-    if (!curl)
-    {
-        Platform::Print("Failed to init curl\n");
+    int sock;
+    if (!ConnectToServer(sock)) {
         return false;
     }
 
+    // Формируем бинарный пакет: steamid (8 байт) + msgType (4 байта) + Protobuf-данные
     uint64_t steamId = g_lastSteamId;
+    const uint8_t *bytes = static_cast<const uint8_t*>(data);
 
-    std::string json = "{ \"msgType\": " + std::to_string(msgType) + ", \"steamid\": " + std::to_string(steamId) + ", \"data\": \"";
+    std::vector<uint8_t> packet;
+    packet.reserve(8 + 4 + size);
 
-    const auto *bytes = static_cast<const uint8_t *>(data);
-    std::string hexData;
-    hexData.reserve(size * 2);
-    for (uint32_t i = 0; i < size; i++)
-    {
-        char hex[3];
-        snprintf(hex, sizeof(hex), "%02x", bytes[i]);
-        hexData += hex;
+    // Записываем steamid (8 байт, little-endian)
+    for (int i = 0; i < 8; i++) {
+        packet.push_back(static_cast<uint8_t>((steamId >> (i * 8)) & 0xFF));
     }
 
-    json += hexData + "\" }";
+    // Записываем msgType (4 байта, little-endian)
+    for (int i = 0; i < 4; i++) {
+        packet.push_back(static_cast<uint8_t>((msgType >> (i * 8)) & 0xFF));
+    }
 
-    std::string responseData;
-    curl_easy_setopt(curl, CURLOPT_URL, g_serverUrl.c_str());
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, json.c_str());
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, json.size());
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION,
-        +[](void *contents, size_t chunkSize, size_t chunkCount, std::string *out) -> size_t {
-            const size_t totalSize = chunkSize * chunkCount;
-            out->append(static_cast<char *>(contents), totalSize);
-            return totalSize;
-        });
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &responseData);
+    // Записываем данные
+    packet.insert(packet.end(), bytes, bytes + size);
 
-    curl_slist *headers = nullptr;
-    headers = curl_slist_append(headers, "Content-Type: application/json");
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-
-    const CURLcode res = curl_easy_perform(curl);
-
-    curl_slist_free_all(headers);
-    curl_easy_cleanup(curl);
-
-    if (res != CURLE_OK)
-    {
-        Platform::Print("Curl error: %s\n", curl_easy_strerror(res));
+    if (!SendData(sock, packet.data(), packet.size())) {
+        closesocket(sock);
         return false;
     }
 
-    uint32_t responseMsgType = msgType;
-    if (!ParseJsonUint32(responseData, "msgType", responseMsgType))
-    {
-        responseMsgType = msgType;
-    }
+    // После отправки запроса закрываем сокет для записи,
+    // чтобы сервер понял, что данных больше не будет
+#ifdef _WIN32
+    shutdown(sock, SD_SEND);
+#else
+    shutdown(sock, SHUT_WR);
+#endif
 
-    std::string hexStr = ParseJsonString(responseData, "data");
-    if (hexStr.empty())
-    {
-        hexStr = ParseJsonString(responseData, "response");
-    }
-
-    if (hexStr.empty())
-    {
-        Platform::Print("External GC response has no data for msg %u\n", msgType);
+    // Получаем ответ от сервера (все данные)
+    std::vector<uint8_t> allData;
+    if (!ReceiveData(sock, allData)) {
+        Platform::Print("Failed to receive response\n");
+        closesocket(sock);
         return false;
     }
 
-    if (!HexToBytes(hexStr, response.data))
-    {
-        Platform::Print("Failed to decode external GC response for msg %u\n", msgType);
+    if (allData.empty()) {
+        Platform::Print("External GC response is empty\n");
         return false;
     }
 
-    if (!WrapServerProtobufPayload(responseMsgType, response.data))
-    {
-        Platform::Print("External GC response for msg %u had empty payload\n", msgType);
-        return false;
+    // Вспомогательная функция для чтения 4 байт little-endian
+    auto ReadUint32LE = [](const uint8_t *data, size_t size, size_t pos, uint32_t &value) -> bool {
+        if (pos + 4 > size) return false;
+        value = data[pos] | (static_cast<uint32_t>(data[pos+1]) << 8) |
+                (static_cast<uint32_t>(data[pos+2]) << 16) |
+                (static_cast<uint32_t>(data[pos+3]) << 24);
+        return true;
+    };
+
+    // Разбираем все сообщения, идущие подряд (с префиксом длины)
+    std::vector<uint8_t> combinedResponse;
+    size_t pos = 0;
+    size_t totalSize = allData.size();
+
+    while (pos < totalSize) {
+        // Читаем длину сообщения (4 байта)
+        if (pos + 4 > totalSize) break;
+        uint32_t msgLen = 0;
+        if (!ReadUint32LE(allData.data(), totalSize, pos, msgLen)) break;
+        pos += 4;
+
+        // Проверяем, что длина не выходит за пределы буфера
+        if (pos + msgLen > totalSize) {
+            // Если данных меньше, чем указано в длине — что-то пошло не так
+            // Добавляем оставшиеся данные как есть (fallback)
+            combinedResponse.insert(combinedResponse.end(),
+                                    allData.begin() + pos,
+                                    allData.end());
+            break;
+        }
+
+        // Копируем само сообщение (msgType + protobuf-данные)
+        combinedResponse.insert(combinedResponse.end(),
+                                allData.begin() + pos,
+                                allData.begin() + pos + msgLen);
+        pos += msgLen;
     }
 
-    response.msgType = responseMsgType | ProtobufMask;
+    // Если combinedResponse пустой — fallback: отправляем всё как есть
+    if (combinedResponse.empty()) {
+        combinedResponse = std::move(allData);
+    }
+
+    response.data = std::move(combinedResponse);
+
+    // Устанавливаем msgType из первого сообщения (если есть)
+    if (!response.data.empty() && response.data.size() >= 4) {
+        uint32_t firstMsgType = 0;
+        if (ReadUint32LE(response.data.data(), response.data.size(), 0, firstMsgType)) {
+            response.msgType = firstMsgType;
+        } else {
+            response.msgType = msgType;
+        }
+    } else {
+        response.msgType = msgType;
+    }
+
     response.ok = true;
-    Platform::Print("External GC response for msg %u -> %u (%zu bytes)\n",
-        msgType, response.msgType, response.data.size());
+
+    // Подсчёт количества сообщений (для лога)
+    size_t msgCount = 0;
+    for (size_t i = 0; i < response.data.size(); ) {
+        if (i + 4 > response.data.size()) break;
+        uint32_t tempMsgType = 0;
+        if (!ReadUint32LE(response.data.data(), response.data.size(), i, tempMsgType)) break;
+        if ((tempMsgType & 0x80000000) != 0) {
+            msgCount++;
+            i += 4;
+            // Пропускаем данные до следующего msgType
+            while (i < response.data.size()) {
+                uint32_t nextMsgType = 0;
+                if (!ReadUint32LE(response.data.data(), response.data.size(), i, nextMsgType)) break;
+                if ((nextMsgType & 0x80000000) != 0) break;
+                i++;
+            }
+        } else {
+            break;
+        }
+    }
+
+    Platform::Print("External GC response for msg %u -> %u (%zu bytes, %zu messages)\n",
+        msgType, response.msgType, response.data.size(), msgCount);
+
+    return true;
+}
+
+static bool ReadUint32LE(const uint8_t *data, size_t size, size_t pos, uint32_t &value) {
+    if (pos + 4 > size) return false;
+    value = data[pos] | (data[pos+1] << 8) | (data[pos+2] << 16) | (data[pos+3] << 24);
     return true;
 }
