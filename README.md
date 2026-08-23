@@ -18,7 +18,7 @@ While it's still possible to connect CS:GO to CS2's GC by spoofing the version n
 
 ## Installation
 - Download [CS:GO from Steam](steam://install/4465480)
-- Download the latest release for your platform from the [releases page](https://github.com/aka3257/csgo_gc-mm/releases/tag/Release)
+- Download the latest release for your platform from the [releases page](https://github.com/aka3257/csgo_gc-mm/releases)
 - Navigate to the game's installation directory
 - Back up your existing launcher executables as they'll be overwritten (i.e. csgo.exe, srcds.exe, csgo_linux64, etc.)
 - Navigate to `/csgo/panorama/`, open terminal in that folder, and execute command `pbin.exe patch_panorama` 
@@ -48,12 +48,12 @@ For Linux clients you don't have to specify any additional options.
 ## Configuration
 if you want to set up your own GC: 
 1. download [CSGO-GC-Replacement](https://github.com/aka3257/CSGO-GC-Replacement)
-2. run `Server_v2.js` to generate config file
+2. run `gc-server.exe` to generate config file
 3. change ip to your internal ip in `config.json`
 4. download source code of csgo_gc-mm from Releases page
-5. navigate to `csgo_gc-continuous/csgo_gc`
-6. open `external_forwarder.cpp` and change ip to your external ip at `static std::string g_serverUrl = "http://your.ip.goes.here/gc";`
-7. build folder `csgo_gc-continuous`
+5. navigate to `csgo_gc-mm-tcp-master/csgo_gc`
+6. open `external_forwarder.cpp` and change ip to your external ip at `static std::string g_serverUrl = "your.ip.goes.here";`
+7. build folder `csgo_gc-mm-tcp-master`
 
 ## License
 This project is licensed under the 2-Clause BSD License. See [LICENSE.md](LICENSE.md) for details.
