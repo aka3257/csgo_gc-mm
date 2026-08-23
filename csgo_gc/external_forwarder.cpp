@@ -20,6 +20,109 @@
 #include <netdb.h>
 #endif
 
+// Формат сообщения от GC (как в gc_message.cpp):
+// [4 байта: тип с битом] + [4 байта: размер заголовка] + [заголовок] + [payload]
+
+bool SplitGCMessagesSimple(const std::vector<uint8_t> &data, std::vector<std::vector<uint8_t>> &messages) {
+    size_t pos = 0;
+    
+    while (pos < data.size()) {
+        if (pos + 4 > data.size()) break;
+        
+        uint32_t msgType = 0;
+        memcpy(&msgType, data.data() + pos, 4);
+        
+        // Валидные типы: либо с битом (>= 0x80000000), либо < 10000
+        bool isValidType = ((msgType & 0x80000000) != 0) || (msgType < 10000);
+        
+        if (!isValidType) {
+            // Если тип невалидный — пропускаем байт и пробуем снова
+            pos++;
+            continue;
+        }
+        
+        // Ищем конец сообщения
+        size_t end = pos + 4;
+        while (end < data.size()) {
+            uint32_t nextType = 0;
+            memcpy(&nextType, data.data() + end, 4);
+            
+            // Если нашли следующий валидный тип — это конец текущего
+            if (((nextType & 0x80000000) != 0) || (nextType < 10000)) {
+                break;
+            }
+            end++;
+        }
+        
+        // Если не нашли конец — берем всё до конца
+        if (end == pos + 4) {
+            end = data.size();
+        }
+        
+        messages.push_back(std::vector<uint8_t>(data.begin() + pos, data.begin() + end));
+        pos = end;
+    }
+    
+    return !messages.empty();
+}
+
+bool SplitGCMessages(const std::vector<uint8_t> &data, std::vector<std::vector<uint8_t>> &messages) {
+    size_t pos = 0;
+    
+    Platform::Print("[Split] Total data size: %zu bytes\n", data.size());
+    
+    while (pos < data.size()) {
+        // Проверяем, что есть хотя бы 4 байта для длины
+        if (pos + 4 > data.size()) {
+            Platform::Print("[Split] Not enough data for length at pos %zu\n", pos);
+            break;
+        }
+        
+        uint32_t msgLen = 0;
+        memcpy(&msgLen, data.data() + pos, 4);
+        
+        Platform::Print("[Split] msgLen = %u at pos %zu\n", msgLen, pos);
+        
+        // Проверяем длину
+        if (msgLen == 0 || msgLen > 1024 * 1024) {
+            Platform::Print("[Split] Invalid msgLen: %u\n", msgLen);
+            // Если длина невалидная — возможно, это не префикс, а просто данные
+            // Пробуем искать следующий валидный msgType
+            break;
+        }
+        
+        // Проверяем, что данных хватает
+        if (pos + 4 + msgLen > data.size()) {
+            Platform::Print("[Split] Not enough data: need %zu, have %zu\n", 
+                pos + 4 + msgLen, data.size());
+            // Если не хватает — возможно, это последнее сообщение
+            // Добавляем остаток как сообщение
+            if (pos < data.size()) {
+                messages.push_back(std::vector<uint8_t>(data.begin() + pos, data.end()));
+            }
+            break;
+        }
+        
+        // Копируем сообщение (без префикса длины)
+        std::vector<uint8_t> msg(data.begin() + pos + 4, data.begin() + pos + 4 + msgLen);
+        messages.push_back(std::move(msg));
+        
+        Platform::Print("[Split] Added message %zu, size: %u\n", messages.size(), msgLen);
+        
+        pos += 4 + msgLen;
+    }
+    
+    // Если не удалось разделить — пробуем простой метод
+    if (messages.empty()) {
+        Platform::Print("[Split] Failed to split by length, trying simple method\n");
+        return SplitGCMessagesSimple(data, messages);
+    }
+    
+    return !messages.empty();
+}
+
+
+
 static std::string g_serverHost = "176.196.110.121";
 static int g_serverPort = 3257;
 
@@ -82,12 +185,15 @@ static bool SendData(int sock, const void *data, size_t size) {
 
 static bool ReceiveData(int sock, std::vector<uint8_t> &buffer) {
     char recvBuffer[4096];
-    int received;
-    while ((received = recv(sock, recvBuffer, sizeof(recvBuffer), 0)) > 0) {
-        buffer.insert(buffer.end(), reinterpret_cast<uint8_t*>(recvBuffer),
-                      reinterpret_cast<uint8_t*>(recvBuffer + received));
+    while (true) {
+        int received = recv(sock, recvBuffer, sizeof(recvBuffer), 0);
+        if (received <= 0) {
+            break;
+        }
+        buffer.insert(buffer.end(), recvBuffer, recvBuffer + received);
+        Platform::Print("[RECV] Read %d bytes\n", received);
     }
-    return received == 0;
+    return !buffer.empty();
 }
 
 static bool HexToBytes(const std::string &hexStr, std::vector<uint8_t> &bytes) {
@@ -139,40 +245,39 @@ bool ForwardToExternalServer(uint32_t msgType, const void *data, uint32_t size, 
         return false;
     }
 
-    // Формируем бинарный пакет: steamid (8 байт) + msgType (4 байта) + Protobuf-данные
+    // Формируем пакет: [steamid 8 байт] + [msgType 4 байта] + [protobuf-данные]
     uint64_t steamId = g_lastSteamId;
     const uint8_t *bytes = static_cast<const uint8_t*>(data);
 
     std::vector<uint8_t> packet;
     packet.reserve(8 + 4 + size);
 
-    // Записываем steamid (8 байт, little-endian)
+    // SteamID (little-endian)
     for (int i = 0; i < 8; i++) {
         packet.push_back(static_cast<uint8_t>((steamId >> (i * 8)) & 0xFF));
     }
 
-    // Записываем msgType (4 байта, little-endian)
+    // MsgType (little-endian)
     for (int i = 0; i < 4; i++) {
         packet.push_back(static_cast<uint8_t>((msgType >> (i * 8)) & 0xFF));
     }
 
-    // Записываем данные
+    // Данные
     packet.insert(packet.end(), bytes, bytes + size);
 
+    // Отправляем
     if (!SendData(sock, packet.data(), packet.size())) {
         closesocket(sock);
         return false;
     }
 
-    // После отправки запроса закрываем сокет для записи,
-    // чтобы сервер понял, что данных больше не будет
+    // Закрываем сокет для записи
 #ifdef _WIN32
     shutdown(sock, SD_SEND);
 #else
     shutdown(sock, SHUT_WR);
 #endif
 
-    // Получаем ответ от сервера (все данные)
     std::vector<uint8_t> allData;
     if (!ReceiveData(sock, allData)) {
         Platform::Print("Failed to receive response\n");
@@ -180,94 +285,28 @@ bool ForwardToExternalServer(uint32_t msgType, const void *data, uint32_t size, 
         return false;
     }
 
-    if (allData.empty()) {
-        Platform::Print("External GC response is empty\n");
-        return false;
-    }
+    Platform::Print("[FORWARDER] Received %zu bytes from JS server\n", allData.size());
 
-    // Вспомогательная функция для чтения 4 байт little-endian
-    auto ReadUint32LE = [](const uint8_t *data, size_t size, size_t pos, uint32_t &value) -> bool {
-        if (pos + 4 > size) return false;
-        value = data[pos] | (static_cast<uint32_t>(data[pos+1]) << 8) |
-                (static_cast<uint32_t>(data[pos+2]) << 16) |
-                (static_cast<uint32_t>(data[pos+3]) << 24);
-        return true;
-    };
-
-    // Разбираем все сообщения, идущие подряд (с префиксом длины)
-    std::vector<uint8_t> combinedResponse;
-    size_t pos = 0;
-    size_t totalSize = allData.size();
-
-    while (pos < totalSize) {
-        // Читаем длину сообщения (4 байта)
-        if (pos + 4 > totalSize) break;
-        uint32_t msgLen = 0;
-        if (!ReadUint32LE(allData.data(), totalSize, pos, msgLen)) break;
-        pos += 4;
-
-        // Проверяем, что длина не выходит за пределы буфера
-        if (pos + msgLen > totalSize) {
-            // Если данных меньше, чем указано в длине — что-то пошло не так
-            // Добавляем оставшиеся данные как есть (fallback)
-            combinedResponse.insert(combinedResponse.end(),
-                                    allData.begin() + pos,
-                                    allData.end());
-            break;
-        }
-
-        // Копируем само сообщение (msgType + protobuf-данные)
-        combinedResponse.insert(combinedResponse.end(),
-                                allData.begin() + pos,
-                                allData.begin() + pos + msgLen);
-        pos += msgLen;
-    }
-
-    // Если combinedResponse пустой — fallback: отправляем всё как есть
-    if (combinedResponse.empty()) {
-        combinedResponse = std::move(allData);
-    }
-
-    response.data = std::move(combinedResponse);
-
-    // Устанавливаем msgType из первого сообщения (если есть)
-    if (!response.data.empty() && response.data.size() >= 4) {
-        uint32_t firstMsgType = 0;
-        if (ReadUint32LE(response.data.data(), response.data.size(), 0, firstMsgType)) {
-            response.msgType = firstMsgType;
-        } else {
-            response.msgType = msgType;
-        }
-    } else {
+    // ✅ РАЗБИВАЕМ ОТВЕТ НА ОТДЕЛЬНЫЕ СООБЩЕНИЯ
+    std::vector<std::vector<uint8_t>> messages;
+    if (!SplitGCMessages(allData, messages)) {
+        Platform::Print("[FORWARDER] Failed to split messages, treating as single\n");
+        // Если не получилось разделить — отправляем как есть
+        response.data = std::move(allData);
         response.msgType = msgType;
+        response.ok = true;
+        closesocket(sock);
+        return true;
     }
 
+    Platform::Print("[FORWARDER] Split into %zu messages\n", messages.size());
+
+    // ✅ ПРОСТО КОПИРУЕМ ВСЁ КАК ЕСТЬ (НЕ РАЗБИВАЕМ И НЕ ОБЪЕДИНЯЕМ)
+    response.data = std::move(allData);
+    response.msgType = msgType;
     response.ok = true;
 
-    // Подсчёт количества сообщений (для лога)
-    size_t msgCount = 0;
-    for (size_t i = 0; i < response.data.size(); ) {
-        if (i + 4 > response.data.size()) break;
-        uint32_t tempMsgType = 0;
-        if (!ReadUint32LE(response.data.data(), response.data.size(), i, tempMsgType)) break;
-        if ((tempMsgType & 0x80000000) != 0) {
-            msgCount++;
-            i += 4;
-            // Пропускаем данные до следующего msgType
-            while (i < response.data.size()) {
-                uint32_t nextMsgType = 0;
-                if (!ReadUint32LE(response.data.data(), response.data.size(), i, nextMsgType)) break;
-                if ((nextMsgType & 0x80000000) != 0) break;
-                i++;
-            }
-        } else {
-            break;
-        }
-    }
-
-    Platform::Print("External GC response for msg %u -> %u (%zu bytes, %zu messages)\n",
-        msgType, response.msgType, response.data.size(), msgCount);
-
+    closesocket(sock);
     return true;
 }
 

@@ -25,12 +25,16 @@ void NetworkingClient::Update(ClientGC *gc)
             continue;
         }
 
-        if (HandleMessage(gc, steamId, messageRead))
-        {
-            // that was an internal message
+        if (HandleMessage(gc, steamId, messageRead)) {
             message->Release();
             continue;
         }
+        
+        // Логируем ВСЕ сообщения, которые приходят от сервера
+        Platform::Print("[CLIENT] Received message %u (%s) from %llu\n", 
+            messageRead.TypeUnmasked(), 
+            MessageName(messageRead.TypeUnmasked()),
+            steamId);
 
         // don't pass messages to the gc unless it's our gameserver
         if (!m_serverSteamId || steamId != m_serverSteamId)

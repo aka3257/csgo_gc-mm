@@ -217,15 +217,30 @@ public:
             LogGCMessage("GC_TO_CLIENT", response.msgType, response.data.data(),
                 static_cast<uint32_t>(response.data.size()));
 
-            if (m_server)
-            {
-                assert(s_serverGC);
-                s_serverGC->m_messageQueue.AddMessage(response.msgType, std::move(response.data));
-            }
-            else
-            {
-                assert(s_clientGC);
-                s_clientGC->m_messageQueue.AddMessage(response.msgType, std::move(response.data));
+            // ✅ РАЗБИВАЕМ ОТВЕТ НА ОТДЕЛЬНЫЕ СООБЩЕНИЯ
+            std::vector<std::vector<uint8_t>> messages;
+            if (SplitGCMessages(response.data, messages)) {
+                Platform::Print("[PROXY] Split into %zu messages\n", messages.size());
+                for (auto &msg : messages) {
+                    if (msg.size() >= 4) {
+                        uint32_t type = 0;
+                        memcpy(&type, msg.data(), 4);
+                        
+                        if (m_server) {
+                            s_serverGC->m_messageQueue.AddMessage(type, std::move(msg));
+                        } else {
+                            s_clientGC->m_messageQueue.AddMessage(type, std::move(msg));
+                        }
+                    }
+                }
+            } else {
+                // Если не получилось разделить — отправляем как есть
+                Platform::Print("[PROXY] Failed to split, treating as single\n");
+                if (m_server) {
+                    s_serverGC->m_messageQueue.AddMessage(response.msgType, std::move(response.data));
+                } else {
+                    s_clientGC->m_messageQueue.AddMessage(response.msgType, std::move(response.data));
+                }
             }
         }
         else
@@ -248,28 +263,25 @@ public:
         }
     }
 
-    EGCResults RetrieveMessage(uint32 *punMsgType, void *pubDest, uint32 cubDest, uint32 *pcubMsgSize) override
-    {
+    EGCResults RetrieveMessage(uint32 *punMsgType, void *pubDest, uint32 cubDest, uint32 *pcubMsgSize) override {
         bool result;
 
-        if (m_server)
-        {
+        if (m_server) {
             result = s_serverGC->m_messageQueue.RetrieveMessage(*punMsgType, pubDest, cubDest, *pcubMsgSize);
-        }
-        else
-        {
+        } else {
             result = s_clientGC->m_messageQueue.RetrieveMessage(*punMsgType, pubDest, cubDest, *pcubMsgSize);
         }
 
-        if (!result)
-        {
-            if (cubDest < *pcubMsgSize)
-            {
+        if (!result) {
+            if (cubDest < *pcubMsgSize) {
                 return k_EGCResultBufferTooSmall;
             }
-
             return k_EGCResultNoMessage;
         }
+
+        // ✅ ЛОГИРУЙ, ЧТО ОТДАЕШЬ ИГРЕ
+        Platform::Print("[PROXY] Returning to game: %u (%s), %u bytes\n", 
+            *punMsgType, MessageName(*punMsgType), *pcubMsgSize);
 
         return k_EGCResultOK;
     }
